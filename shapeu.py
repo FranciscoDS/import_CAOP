@@ -17,11 +17,12 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-# Copyright (C) 2012
+# Copyright (C) 2012-2013
 #    Francisco Dos Santos <f.dos.santos@free.fr>
 
 """
-Some useful stuff dealing with Point, Segment, Lines and doing topology magic.
+Some useful stuff dealing with Point, Segment, Lines and doing
+topology magic.
 """
 
 import math
@@ -29,13 +30,15 @@ import array
 import pyproj
 geod = pyproj.Geod(ellps='WGS84')
 precision = 9   # Compute with 9 digits but truncated for OSM to 7 digits
+import logo
 
 
-#
-# Manage unique Segment and Point
-# Grouping Segments in Polyline
-#
 class ShapeUtil:
+    """
+    Manage unique Segment and Point
+    Grouping Segments in Polyline.
+    """
+
     def __init__(self, mem):
         self.point_pos = {}                   # (lon, lat) -> point id
         self.segment_connect = array.array('i',
@@ -218,10 +221,16 @@ class ShapeUtil:
         return
 
 
+    def nbrPoints(self):
+        """ Return number of distinct points. """
+        return len(self.point_pos)
+
+
     def iterLines(self):
         """
         Generator function on lineid and list of pointid.
         """
+
         for lineid in xrange(self.line_count):
             segmentdir1 = self.line_ends[lineid*2]
             segmentdir2 = self.line_ends[lineid*2+1]
@@ -234,15 +243,26 @@ class ShapeUtil:
         return
 
 
+    def nbrLines(self):
+        """ Return number of lines. """
+        return self.line_count
+
+
     def buildSimplifiedLines(self):
         """
-        Grab each segment and build polylines (OSM way compatible)
-        Attach a way to its successor/predecessor if there's only 1 connection,
-        remove useless point (simplify geometry) and make sure there's not too
-        much point in a line (limit of 2000 OSM nodes per way).
+        Grab each segment and build polylines (OSM way compatible).
+
+        Attach a way to its successor/predecessor if there's only 1
+        connection, remove useless point (simplify geometry) and make
+        sure there's not too much point in a line (limit of 2000 OSM
+        nodes per way).
         """
 
+        logo.DEBUG("Before simplification %d points, %d segments" % (
+                   len(self.point_pos), self.segment_count/2))
+        logo.starting("Line simplification", self.segment_count)
         for segmentnum in xrange(0, self.segment_count, 2):
+            logo.progress(segmentnum)
             if self.line_seg[segmentnum/2]:   # Already attached
                 continue
             segmentdir1 = segmentnum
@@ -343,10 +363,14 @@ class ShapeUtil:
             if self.coord_pnt[segmentnum] != coordpts[-1]:
                 segmentnum = segmentnum^1
             self.line_ends.append(segmentnum)
+        logo.ending()
+        logo.DEBUG("After simplification %d points, %d lines" % (
+                   len(self.point_pos), self.line_count))
 
 
     def nbrConnection(self, pointid):
-        """ Return number of connection for a given point id """
+        """ Return number of connection for a given point id. """
+
         cnt = 0
         segmentnum = pointid
         while self.segment_connect[segmentnum] != pointid:

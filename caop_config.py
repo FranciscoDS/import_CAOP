@@ -18,8 +18,12 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-# Copyright (C) 2012
+# Copyright (C) 2012-2013
 #    Francisco Dos Santos <f.dos.santos@free.fr>
+
+"""
+Configuration file.
+"""
 
 # dbname = PostgreSQL database parameters 
 dbname = "dbname=osmosis user=caop"
@@ -31,6 +35,18 @@ password = "*"
 # comment + source = information put in changeset
 comment = "Import Carta Administrativa de Portugal"
 source = "IGP-CAOP-2012"
+
+# logfile = messages log file (if None stdout will be used)
+logfile = None
+
+# verbose = what kind of messages will be logged
+#           - False for warning and error only
+#           - True for all messages except debug
+#           - 2 for all messages including debug
+verbose = True
+
+# progress = use stdout for messages and progress status (keep quiet if False)
+progress = True
 
 # cachesize = number max of object when building geometries
 # It was intended to cache object in memory before swapping to disk but was

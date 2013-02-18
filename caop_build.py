@@ -18,14 +18,15 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-# Copyright (C) 2012
+# Copyright (C) 2012-2013
 #    Francisco Dos Santos <f.dos.santos@free.fr>
 
-import os, sys
+import sys
 import re
 import psycopg2
 from osgeo import gdal, ogr, osr
 from shapeu import ShapeUtil
+import logo
 import caop_config
 
 # GDAL 1.9.0 can do the ISO8859-1 to UTF-8 recoding for us
@@ -49,8 +50,10 @@ preposition = (
 
 def convertname(name):
     """
-    Convert and normalize name from an ISO8859 string to an UTF8 string.
-    Earch word in the name are capitalized except some portuguese preposition
+    Convert and normalize name from ISO8859 string to UTF8 string.
+
+    Earch word in the name are capitalized except for some portuguese
+    preposition.
     """
 
     name = name.decode("ISO8859")
@@ -83,11 +86,10 @@ def convertname(name):
 
 def read_CAOP(filename, shapeu):
     """
-    Read the shapefile and build the AdminEnt object for each administrative
-    entity.
+    Read the shapefile and build the geometry.
 
-    We expect only 1 layer of type polygon, coordinate reprojected to WGS84,
-    string attribute converted to UTF8.
+    We expect only 1 layer of type polygon, coordinates are reprojected
+    to WGS84.
     """
 
     shapefile = ogr.Open(filename)
@@ -97,12 +99,12 @@ def read_CAOP(filename, shapeu):
     # Verify field and geometry type
     for field in ( "DICOFRE", "MUNICIPIO", "FREGUESIA" ):
         if layerDef.GetFieldIndex(field) == -1:
-            raise Exception("Field '%s' not found" % field)
+            raise logo.ERROR("Field '%s' not found" % field)
     if (layerDef.GetFieldIndex("DISTRITO") == -1
       and layerDef.GetFieldIndex("ILHA") == -1):
-        raise Exception("Field 'DISTRITO' or 'ILHA' not found")
+        raise logo.ERROR("Field 'DISTRITO' or 'ILHA' not found")
     if layerDef.GetGeomType() != ogr.wkbPolygon:
-        raise Exception("Not a POLYGON file")
+        raise logo.ERROR("Not a POLYGON file")
 
     # Reproject on the fly
     srcSpatialRef = layer.GetSpatialRef()
@@ -111,7 +113,9 @@ def read_CAOP(filename, shapeu):
     transform = osr.CoordinateTransformation(srcSpatialRef, dstSpatialRef)
 
     # Read each polygon and build the connection arrays (point, segment, line)
+    logo.starting("Geometry read", layer.GetFeatureCount())
     for featnum in xrange(layer.GetFeatureCount()):
+        logo.progress(featnum)
         feature = layer.GetFeature(featnum)
         geometry  = feature.GetGeometryRef()
         newgeometry = geometry.Clone()
@@ -119,6 +123,8 @@ def read_CAOP(filename, shapeu):
 
         # Outer Ring (1) followed by Inner Rings (n-1)
         # we create all segments for each ring to find the topology ...
+        logo.DEBUG("Feature %d with %d rings" % (featnum,
+                   newgeometry.GetGeometryCount()))
         for i in xrange(newgeometry.GetGeometryCount()):
             ring = newgeometry.GetGeometryRef(i)
             lon1, lat1 = ring.GetPoint_2D(0)
@@ -126,14 +132,14 @@ def read_CAOP(filename, shapeu):
                 lon2, lat2 = ring.GetPoint_2D(pnt)
                 shapeu.makeSegment(lon1, lat1, lon2, lat2)
                 lon1, lat1 = lon2, lat2
+    logo.ending()
 
 
 def admin_CAOP(filename, shapeu, admins):
     """
     Reread the shapefile and build each administrative entity.
 
-    We expect only 1 layer of type polygon, coordinate reprojected to WGS84,
-    string attribute converted to UTF8.
+    Geometry described by a set of lines, attributes converted to UTF8.
     """
 
     shapefile = ogr.Open(filename)
@@ -142,9 +148,11 @@ def admin_CAOP(filename, shapeu, admins):
 
     # Detect if we are dealing with Portugal or the autonomous regions
     if layerDef.GetFieldIndex("DISTRITO") != -1:
+        logo.DEBUG("Found DISTRITO using admin level 6, 7, 8")
         isregion = False
         toplevel = "DISTRITO"
     elif layerDef.GetFieldIndex("ILHA") != -1:
+        logo.DEBUG("Found ILHA using admin level 4, 7, 8")
         isregion = True
         toplevel = "ILHA"
 
@@ -155,7 +163,9 @@ def admin_CAOP(filename, shapeu, admins):
     transform = osr.CoordinateTransformation(srcSpatialRef, dstSpatialRef)
 
     # Reread each polygon and create the right administrative area
+    logo.starting("Attributes read", layer.GetFeatureCount())
     for featnum in xrange(layer.GetFeatureCount()):
+        logo.progress(featnum)
         feature = layer.GetFeature(featnum)
         geometry  = feature.GetGeometryRef()
         newgeometry = geometry.Clone()
@@ -164,6 +174,9 @@ def admin_CAOP(filename, shapeu, admins):
         distrito  = convertname(feature.GetField(toplevel))
         municipio = convertname(feature.GetField("MUNICIPIO"))
         freguesia = convertname(feature.GetField("FREGUESIA"))
+        logo.DEBUG("Feature %d %s='%s' MUNICIPIO='%s' FREGUESIA='%s'" % (
+                   featnum, toplevel, distrito,
+                   municipio, freguesia))
 
         # Distrito or Region
         if isregion:
@@ -241,11 +254,13 @@ def admin_CAOP(filename, shapeu, admins):
 
         admins[dicofre1]["outer"].symmetric_difference_update(outer)
         admins[dicofre1]["outer"].symmetric_difference_update(inner)
+    logo.ending()
 
 
 def findclosedrings(lines, shapeu, closedrings):
     """
     Group lines in closed rings.
+
     From a list of unordered lineid construct a list of closed rings,
     each closed rings is a list of ordered lineid.
     Return 0 if all lines are correctly grouped in closed rings.
@@ -354,26 +369,28 @@ def verify_admin(shapeu, admins):
     """
     Check that all administrative area are closed.
 
-    For the upper level (aggregation of administrative area) also search for
-    ring contained in another.
+    For the upper level (aggregation of administrative area) also search
+    for ring contained in another.
     """
 
+    logo.starting("Verify admin area", len(admins))
     for dicofre in admins:
+        logo.progress()
         closedrings = []
         if len(dicofre) > 4:
             # Check administrative area read from the shapefile
             # this cannot fail unless something was really wrong
             if findclosedrings(admins[dicofre]["outer"], shapeu, closedrings):
-                message("ERROR Area '%s' (DICOFRE=%s) outer ring not closed\n"
-                        % (admins[dicofre]["name"], dicofre) )
+                logo.ERROR("Area '%s' (DICOFRE=%s) outer ring not closed"
+                           % (admins[dicofre]["name"], dicofre) )
             if findclosedrings(admins[dicofre]["inner"], shapeu, closedrings):
-                message("ERROR Area '%s' (DICOFRE=%s) inner ring not closed\n"
-                        % (admins[dicofre]["name"], dicofre) )
+                logo.ERROR("Area '%s' (DICOFRE=%s) inner ring not closed\n"
+                           % (admins[dicofre]["name"], dicofre) )
         else:
             # Analyze the aggregate administrative area
             if findclosedrings(admins[dicofre]["outer"], shapeu, closedrings):
-                message("ERROR Area '%s' (DICOFRE=%s) not closed\n"
-                        % (admins[dicofre]["name"], dicofre) )
+                logo.ERROR("Area '%s' (DICOFRE=%s) not closed\n"
+                           % (admins[dicofre]["name"], dicofre) )
 
             # Get coordinates of each ring, compare and detect inner rings
             bboxrings = []
@@ -423,14 +440,16 @@ def verify_admin(shapeu, admins):
                         admins[dicofre]["outer"].difference_update(closedrings[j])
                         admins[dicofre]["inner"].update(closedrings[j])
                         break
+    logo.ending()
 
 
 def create_caop_table(db):
-    """ Recreate caop tables."""
+    """ Recreate caop tables. """
 
     cursor = db.cursor()
 
     # Create node tables
+    logo.DEBUG("Create Node tables")
     cursor.execute("""DROP TABLE IF EXISTS caop_nodes""")
     cursor.execute("""CREATE TABLE caop_nodes (
                         caop_id bigint NOT NULL,
@@ -449,6 +468,7 @@ def create_caop_table(db):
                       )""")
 
     # Create way tables
+    logo.DEBUG("Create Way tables")
     cursor.execute("""DROP TABLE IF EXISTS caop_ways""")
     cursor.execute("""CREATE TABLE caop_ways (
                         caop_id bigint NOT NULL,
@@ -470,6 +490,7 @@ def create_caop_table(db):
                       )""")
 
     # Create relation tables
+    logo.DEBUG("Create Relation tables")
     cursor.execute("""DROP TABLE IF EXISTS caop_relations""")
     cursor.execute("""CREATE TABLE caop_relations (
                         caop_id bigint NOT NULL,
@@ -493,6 +514,7 @@ def create_caop_table(db):
                       )""")
 
     # Primary key for node, way, relation
+    logo.DEBUG("Create primary key")
     cursor.execute("""ALTER TABLE caop_nodes
                       ADD CONSTRAINT pk_caop_nodes
                         PRIMARY KEY (caop_id)
@@ -517,6 +539,7 @@ def create_caop_table(db):
                    """)
 
     # Create index on nodes
+    logo.DEBUG("Create index")
     cursor.execute("""CREATE INDEX idx_caop_node_geom
                       ON caop_nodes USING gist (geom)
                    """)
@@ -533,6 +556,7 @@ def create_caop_table(db):
                    """)
 
     # Auto-incrementing sequence for caop_id
+    logo.DEBUG("Create sequence")
     cursor.execute("""DROP SEQUENCE IF EXISTS seq_caop_id""")
     cursor.execute("""CREATE SEQUENCE seq_caop_id INCREMENT BY -1""")
 
@@ -540,11 +564,14 @@ def create_caop_table(db):
 
 
 def create_temp_table(db):
-    """ Create temporary table to assign caop_id to line, point, admin."""
+    """
+    Create temporary table to assign caop_id to line, point, admin.
+    """
 
     cursor = db.cursor()
 
     # Table converting id into unique id
+    logo.DEBUG("Create Temporary tables")
     cursor.execute("""CREATE TEMPORARY TABLE caop_points (
                         point_id int NOT NULL,
                         caop_id bigint NOT NULL
@@ -568,12 +595,16 @@ def create_temp_table(db):
 
 
 def import_caop(db, shapeu, admins):
-    """ Import with an unique id all nodes, ways, relations."""
+    """
+    Import with an unique id all nodes, ways, relations.
+    """
 
     cursor = db.cursor()
 
     # Points -> Nodes
+    logo.starting("Saving nodes", shapeu.nbrPoints())
     for pointid, coord in shapeu.iterPoints():
+        logo.progress()
         pointwkt = "POINT(%.7f %.7f)" % (coord[0], coord[1])
         cursor.execute("""INSERT INTO caop_points (point_id) VALUES (%s)""",
                        (pointid,) )
@@ -581,9 +612,12 @@ def import_caop(db, shapeu, admins):
                             currval('seq_caop_id'),
                             ST_GeomFromText(%s, 4326))""", (pointwkt,) )
     db.commit()
+    logo.ending()
 
     # Lines -> Ways
+    logo.starting("Saving ways", shapeu.nbrLines())
     for lineid, pntids in shapeu.iterLines():
+        logo.progress()
         cursor.execute("""INSERT INTO caop_lines (line_id) VALUES (%s)""",
                        (lineid,) )
         cursor.execute("""INSERT INTO caop_ways (caop_id) VALUES (
@@ -603,11 +637,14 @@ def import_caop(db, shapeu, admins):
                             'admin_level', 8
                           )""")
     db.commit()
+    logo.ending()
 
     # Admins -> Relations
     cpt = 0
+    logo.starting("Saving relations", len(admins))
     for dicofre in admins:
         cpt += 1
+        logo.progress(cpt)
         cursor.execute("""INSERT INTO caop_admins (admin_id) VALUES (%s)""",
                        (cpt,) )
         cursor.execute("""INSERT INTO caop_relations (caop_id) VALUES (
@@ -648,10 +685,13 @@ def import_caop(db, shapeu, admins):
                            """, (admins[dicofre]["level"],
                                  admins[dicofre]["level"]) )
     db.commit()
+    logo.ending()
 
 
 def vacuum_analyze_db(db):
-    # Update statistics
+    """ Update DB statistics. """
+
+    logo.DEBUG("Vacuum Analyze")
     isolation_level = db.isolation_level
     db.set_isolation_level(0)
     cursor = db.cursor()
@@ -660,8 +700,9 @@ def vacuum_analyze_db(db):
 
 
 def check_db_caop(db):
-    """ Check for special caop table."""
+    """ Check for special caop tables. """
 
+    logo.DEBUG("Checking for CAOP tables ...")
     cursor = db.cursor()
     try:
         cursor.execute("""SELECT max(caop_id) FROM caop_nodes
@@ -675,40 +716,45 @@ def check_db_caop(db):
         cursor.fetchall()  # ignore result, just check if table exists
     except psycopg2.ProgrammingError:
         db.rollback()
+        logo.DEBUG("... no CAOP tables")
         return False
     db.commit()
+    logo.DEBUG("... CAOP tables exists")
     return True
 
 
-def message(txt):
-    sys.stderr.write(txt)
-
-
 def main():
+    logo.init(filename = caop_config.logfile,
+              verbose = caop_config.verbose,
+              progress = caop_config.progress)
+    if len(sys.argv) < 2:
+        raise logo.ERROR("Missing input Shapefile")
+
+    logo.DEBUG("Connect to DB(%s)" % caop_config.dbname)
     db = psycopg2.connect(caop_config.dbname)
     if not check_db_caop(db):
-        message("Creating PostgreSQL tables\n")
+        logo.INFO("Creating PostgreSQL tables")
         create_caop_table(db)
     create_temp_table(db)
 
     shapeu = ShapeUtil(caop_config.cachesize)
     for i in xrange(1, len(sys.argv)):
-        message("Reading geometries '%s'\n" % sys.argv[i])
+        logo.INFO("Reading geometries '%s'" % sys.argv[i])
         read_CAOP(sys.argv[i], shapeu)
 
-    message("Simplify geometries\n")
+    logo.INFO("Simplify geometries")
     shapeu.buildSimplifiedLines()
 
-    message("Building administrative area\n")
+    logo.INFO("Building administrative area")
     admins = {}
     for i in xrange(1, len(sys.argv)):
         admin_CAOP(sys.argv[i], shapeu, admins)
     verify_admin(shapeu, admins)
 
-    message("Importing into database\n")
+    logo.INFO("Importing into database")
     import_caop(db, shapeu, admins)
-    message("Done\n")
     vacuum_analyze_db(db)
+    logo.close()
 
 
 if __name__ == '__main__':
