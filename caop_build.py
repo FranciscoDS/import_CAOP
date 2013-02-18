@@ -24,9 +24,14 @@
 import os, sys
 import re
 import psycopg2
-from osgeo import ogr, osr
+from osgeo import gdal, ogr, osr
 from shapeu import ShapeUtil
 import caop_config
+
+# GDAL 1.9.0 can do the ISO8859-1 to UTF-8 recoding for us
+# but will do it ourself to be backward compatible
+gdal.SetConfigOption('SHAPE_ENCODING', '')
+
 
 #
 # Definitions
