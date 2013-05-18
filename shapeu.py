@@ -383,8 +383,7 @@ class ShapeUtil:
 def simplifyPoints(points):
     """
     Simplify a line (ordered list of points).
-    Looks like a Douglas-Peucker but without recursion (quicker as we not
-    seek the optimal simplification) and preserving the big angles.
+    Use a Douglas-Peucker with a small distance and preserve big angles.
     """
 
     # The first and last point are never simplified (for a line)
@@ -392,54 +391,51 @@ def simplifyPoints(points):
     # simplified will never be tried
     resultpnt = [ points[0] ]
     deletepnt = []
-    lon1, lat1 = points[0]
-    lon2, lat2 = points[1]
-    angle1, dist1 = angledistance(lon1, lat1, lon2, lat2)
-    cache = [ (angle1, dist1) ]   # store previous result (angle, distance)
-
-    for pnt in xrange(1, len(points)-1):
-        # Compute all angle and distance needed to judge usefulness for
-        # the '-nth points in one step (thanks to pyproj and lists)
-        lon2, lat2 = points[pnt]
-        lon3, lat3 = points[pnt+1]
-        tlonsrc = [ lon1, lon2 ]
-        tlatsrc = [ lat1, lat2 ]
-        tlondst = [ lon3 ] * (len(cache)+1)
-        tlatdst = [ lat3 ] * (len(cache)+1)
-        for j in xrange(1, len(cache)):
-            lon2, lat2 = points[pnt-j]
-            tlonsrc.append(lon2)
-            tlatsrc.append(lat2)
+    pnt1 = 0
+    stack = [ len(points)-1 ]
+    while len(stack) > 0:
+        # Compute all angle and distance needed to find the most significant
+        # point between pnt1 and pnt2 in one step (thanks to pyproj and lists)
+        pnt2 = stack[-1]
+        tlonsrc = [ points[i][0] for i in xrange(pnt1+1, pnt2)
+                                 for j in xrange(2) ]
+        tlatsrc = [ points[i][1] for i in xrange(pnt1+1, pnt2)
+                                 for j in xrange(2) ]
+        tlondst = [ points[j][0] for i in xrange(pnt2-pnt1-1)
+                                 for j in (pnt1, pnt2) ]
+        tlatdst = [ points[j][1] for i in xrange(pnt2-pnt1-1)
+                                 for j in (pnt1, pnt2) ]
+        tlonsrc.insert(0, points[pnt1][0])
+        tlatsrc.insert(0, points[pnt1][1])
+        tlondst.insert(0, points[pnt2][0])
+        tlatdst.insert(0, points[pnt2][1])
         angles, dists = angledistance(tlonsrc, tlatsrc, tlondst, tlatdst)
 
-        # Verify constraint (angle and deviation) for current point and
-        # previously simplified points
-        dist3 = dists[0]
-        for j in xrange(len(cache)):
-            angle1, dist1 = cache[j]
-            angle2 = angles[j+1]
-            dist2 = dists[j+1]
-            diffangle = angle2 - angle1
-            if diffangle < -180:
-                diffangle += 360
-            elif diffangle > 180:
-                diffangle -= 360
-            deviation = getdeviation(diffangle, dist1, dist2, dist3)
+        pntfound = None
+        devfound = 0
+        for i in xrange(pnt2-pnt1-1):
+            deviation = getdeviation(dists[i*2+1], dists[i*2+2], dists[0])
+            if deviation > devfound:
+                if deviation >= 2.0:
+                    pntfound = i+pnt1+1
+                    devfound = deviation
+                else:
+                    diffangle = angles[i*2+1] - angles[i*2+2]
+                    if diffangle < -180:
+                        diffangle += 360
+                    elif diffangle > 180:
+                        diffangle -= 360
+                    if 180.0-abs(diffangle) >= 40.0 - abs(deviation)*16.0:
+                        pntfound = i+pnt1+1
+                        devfound = deviation
 
-            if (abs(diffangle) >= 40.0 - abs(deviation)*16.0
-              or abs(deviation) >= 2.0):
-                # cannot simplify pnt as it will break constraint
-                cache = [ (angles[1], dists[1]) ]
-                resultpnt.append(points[pnt])
-                lon1, lat1 = points[pnt]
-                break
-
+        if pntfound is None:
+            deletepnt.extend([ points[i] for i in xrange(pnt1+1,pnt2) ])
+            pnt1 = stack.pop()
+            resultpnt.append(points[pnt1])
         else:
-            # constraint verified for all points, we can simplify pnt
-            cache.insert(0, (angles[0], dists[0]) )
-            deletepnt.append(points[pnt])
+            stack.append(pntfound)
 
-    resultpnt.append(points[-1])
     return (resultpnt, deletepnt)
 
 
@@ -496,10 +492,22 @@ def angledistance(lonsrc, latsrc, londst, latdst):
     return (angles, dists)
 
 
-def getdeviation(diffangle, dist1, dist2, dist3):
-    # diffangle = 180 - realangle
-    angle = math.radians(diffangle)
-    return (dist1 * dist2 * math.sin(angle) / dist3)
+def getdeviation(dist1, dist2, dist3):
+    # obtuse angle on x1 no projected point on line
+    try:
+        angl1 = math.acos((dist3**2 + dist1**2 - dist2**2) / (2*dist3*dist1))
+    except:
+        return dist1
+    if angl1 >= math.pi/2:
+        return dist1
+    # obtuse angle on x2 no projected point on line
+    try:
+        angl2 = math.acos((dist3**2 + dist2**2 - dist1**2) / (2*dist3*dist2))
+    except:
+        return dist2
+    if angl2 >= math.pi/2:
+        return dist2
+    return math.sin(angl1)*dist1
 
 
 def fixSelfIntersect(points, ptsdeleted):
