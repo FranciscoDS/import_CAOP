@@ -6,8 +6,6 @@ Este programa foi desenvolvido e testado com as seguintes versões de software :
 
   - Python 2.7.3
   - gdal 1.7.3
-  - proj.4.7.0
-  - pyproj 1.8.9
   - postgresql 9.1.3
   - postgis 1.5.3
   - psycopg2 2.4.5
@@ -22,8 +20,6 @@ distribuição Linux.
 Não esquecer instalar os packages com os bindings Python. Se um package não
 está presente na sua distribuiçao Linux é preciso fazer a instalação a partir
 do código fonte, não esquecer instalar os packages 'dev' por este efeito.
-Por exemplo para compilar e instalar pyproj (http://pypi.python.org/pypi/pyproj)
-é preciso ter o package 'proj.4-dev/-devel'.
 
 
 

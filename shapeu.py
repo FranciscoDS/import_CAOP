@@ -27,8 +27,6 @@ topology magic.
 
 import math
 import array
-import pyproj
-geod = pyproj.Geod(ellps='WGS84')
 precision = 9   # Compute with 9 digits but truncated for OSM to 7 digits
 import logo
 
@@ -394,39 +392,28 @@ def simplifyPoints(points):
     pnt1 = 0
     stack = [ len(points)-1 ]
     while len(stack) > 0:
-        # Compute all angle and distance needed to find the most significant
-        # point between pnt1 and pnt2 in one step (thanks to pyproj and lists)
+        # Compute angle and distance to find the most significant point
+        # between pnt1 and pnt2
         pnt2 = stack[-1]
-        tlonsrc = [ points[i][0] for i in xrange(pnt1+1, pnt2)
-                                 for j in xrange(2) ]
-        tlatsrc = [ points[i][1] for i in xrange(pnt1+1, pnt2)
-                                 for j in xrange(2) ]
-        tlondst = [ points[j][0] for i in xrange(pnt2-pnt1-1)
-                                 for j in (pnt1, pnt2) ]
-        tlatdst = [ points[j][1] for i in xrange(pnt2-pnt1-1)
-                                 for j in (pnt1, pnt2) ]
-        tlonsrc.insert(0, points[pnt1][0])
-        tlatsrc.insert(0, points[pnt1][1])
-        tlondst.insert(0, points[pnt2][0])
-        tlatdst.insert(0, points[pnt2][1])
-        angles, dists = angledistance(tlonsrc, tlatsrc, tlondst, tlatdst)
-
+        angle_0, dist_0 = angledistance(points[pnt1][0], points[pnt1][1],
+                                        points[pnt2][0], points[pnt2][1])
         pntfound = None
         devfound = 0
-        for i in xrange(pnt2-pnt1-1):
-            deviation = getdeviation(dists[i*2+1], dists[i*2+2], dists[0])
+        for pt in xrange(pnt1+1, pnt2):
+            angle_1, dist_1 = angledistance(points[pnt1][0], points[pnt1][1],
+                                            points[pt][0], points[pt][1])
+            angle_2, dist_2 = angledistance(points[pt][0], points[pt][1],
+                                            points[pnt2][0], points[pnt2][1])
+            deviation = getdeviation(diffheading(angle_0, angle_1),
+                                     dist_0, dist_1, dist_2)
             if deviation > devfound:
                 if deviation >= 2.0:
-                    pntfound = i+pnt1+1
+                    pntfound = pt
                     devfound = deviation
-                else:
-                    diffangle = angles[i*2+1] - angles[i*2+2]
-                    if diffangle < -180:
-                        diffangle += 360
-                    elif diffangle > 180:
-                        diffangle -= 360
-                    if 180.0-abs(diffangle) >= 40.0 - abs(deviation)*16.0:
-                        pntfound = i+pnt1+1
+                elif deviation >= 0.3:
+                    diffangle = diffheading(angle_2, angle_1)
+                    if abs(diffangle) >= 40.0 - abs(deviation)*16.0:
+                        pntfound = pt
                         devfound = deviation
 
         if pntfound is None:
@@ -439,75 +426,53 @@ def simplifyPoints(points):
     return (resultpnt, deletepnt)
 
 
+def diffheading(angle1, angle2):
+    """ Return difference of angles in radians. """
+
+    diffangle = angle1 - angle2
+    if diffangle < -180:
+        diffangle += 360
+    elif diffangle > 180:
+        diffangle -= 360
+    return diffangle
+
+
 def angledistance(lonsrc, latsrc, londst, latdst):
     """
-    Compute angle and distance from (lonsrc, latsrc) to (londst, latdst).
-    The parameters can also be arrays (quicker to do 1 call to pyproj with
-    N calculation than N call with 1 calculation).
+    Compute heading and distance from (lonsrc, latsrc) to (londst, latdst).
+    Return (heading, distance) in radians.
     """
 
-    try:
-        angles, dummy, dists = geod.inv(lonsrc, latsrc, londst, latdst)
-    except:
-        # oups, got an exception with valid coordinates
-        # (see http://code.google.com/p/pyproj/issues/detail?id=18)
-        # with WGS84 if coordinates are too close, proj4 gives us a NaN
-        # until http://trac.osgeo.org/proj/ticket/129 is fixed,
-        # fallback to haversine formulae (only for the troublesome coordinates)
-        if type(lonsrc) is float or len(lonsrc)==1:
-            if type(lonsrc) is float:
-                x1 = lonsrc
-                y1 = latsrc
-                x2 = londst
-                y2 = latdst
-            else:
-                x1 = lonsrc[0]
-                y1 = latsrc[0]
-                x2 = londst[0]
-                y2 = latdst[0]
-            dx = x2 - x1
-            dy = y2 - y1
-            angle = math.acos( dy/math.sqrt(dx*dx + dy*dy) ) / math.pi * 180
-            angle = math.copysign(angle, dx)
-            rlat1 = math.radians(y1)
-            rlon1 = math.radians(x1)
-            rlat2 = math.radians(y2)
-            rlon2 = math.radians(x2)
-            p = math.sin((rlat2-rlat1)/2)**2 + math.cos(rlat1) * math.cos(rlat2) * math.sin((rlon2-rlon1)/2)**2
-            q = 2 * math.atan2(math.sqrt(p), math.sqrt(1-p))
-            dist = 6371000*q
-            if type(lonsrc) is float:
-                return (angle, dist)
-            else:
-                return ([angle], [dist])
-        else:
-            middle = len(lonsrc)/2
-            angles, dists = angledistance(lonsrc[:middle], latsrc[:middle],
-                                          londst[:middle], latdst[:middle])
-            angle2, dist2 = angledistance(lonsrc[middle:], latsrc[middle:],
-                                          londst[middle:], latdst[middle:])
-            angles.extend(angle2)
-            dists.extend(dist2)
-
-    return (angles, dists)
+    rlat1 = math.radians(latsrc)
+    rlon1 = math.radians(lonsrc)
+    rlat2 = math.radians(latdst)
+    rlon2 = math.radians(londst)
+    head = math.atan2(math.sin(rlon2-rlon1) * math.cos(rlat2),
+                      math.cos(rlat1) * math.sin(rlat2) -
+                      math.sin(rlat1) * math.cos(rlat2) * math.cos(rlon2-rlon1)
+                     ) / math.pi * 180.0
+    p = math.sin((rlat2-rlat1)/2)**2 + math.cos(rlat1) * math.cos(rlat2) * math.sin((rlon2-rlon1)/2)**2
+    adist = 2 * math.atan2(math.sqrt(p), math.sqrt(1-p))
+    return (head, adist)
 
 
-def getdeviation(dist1, dist2, dist3):
-    # obtuse angle on x1 no projected point on line
-    try:
-        angl1 = math.acos((dist3**2 + dist1**2 - dist2**2) / (2*dist3*dist1))
-    except:
-        return dist1
-    if angl1 >= math.pi/2:
-        return dist1
-    # obtuse angle on x2 no projected point on line
-    try:
-        angl2 = math.acos((dist3**2 + dist2**2 - dist1**2) / (2*dist3*dist2))
-    except:
-        return dist2
-    if angl2 >= math.pi/2:
-        return dist2
-    return math.sin(angl1)*dist1
+def getdeviation(diffangle, adist0, adist1, adist2):
+    """
+    Compute distance (in meters) from point P to line AB.
+    Return distance to A or B if projected point doesn't exist on line.
+    """
+
+    if abs(diffangle) < 90.0:
+        # Compute cross-track error
+        e = math.asin(math.sin(adist1)*math.sin(math.radians(diffangle)))
+        d = math.acos(math.cos(adist1)/math.cos(e))
+        if d > adist0:
+            # Point is after line AB, return distance to B
+            e=adist2
+    else:
+        # Point is before line AB, return distance to A
+        e=adist1
+    return abs(e)*6371000.0
 
 
 def fixSelfIntersect(points, ptsdeleted):
@@ -557,12 +522,15 @@ def fixSelfIntersect(points, ptsdeleted):
                 # Choose which point to delete
                 # keep point closer to intersection
                 pt = max(seg1, seg2)
-                tlonsrc = [ crossing[segintersect][0] ] * 2
-                tlatsrc = [ crossing[segintersect][1] ] * 2
-                tlondst = [ points[pt-1][0], points[pt][0] ]
-                tlatdst = [ points[pt-1][1], points[pt][1] ]
-                angl, dist = angledistance(tlonsrc, tlatsrc, tlondst, tlatdst)
-                if dist[0] > dist[1]:
+                angl, dist_0 = angledistance(crossing[segintersect][0],
+                                             crossing[segintersect][1],
+                                             points[pt-1][0],
+                                             points[pt-1][1])
+                angl, dist_1 = angledistance(crossing[segintersect][0],
+                                             crossing[segintersect][1],
+                                             points[pt][0],
+                                             points[pt][1])
+                if dist_0 > dist_1:
                     pt = pt-1
                 logo.WARN("Fix self-intersect for line %s and %s removing %s"
                           % (tuple(points[seg1:seg1+2]),
