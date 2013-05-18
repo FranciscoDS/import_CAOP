@@ -302,6 +302,7 @@ class ShapeUtil:
 
             # Find useless points
             coordpts, purgepts = simplifyPoints(coordpts)
+            coordpts, purgepts = fixSelfIntersect(coordpts, purgepts)
 
             # Now the *not so* fun part, we change and delete some segments.
             # The ids will change so we work with point coordinates and we
@@ -425,7 +426,7 @@ def simplifyPoints(points):
                 diffangle -= 360
             deviation = getdeviation(diffangle, dist1, dist2, dist3)
 
-            if (abs(diffangle) >= 45.0 - abs(deviation)*18.0
+            if (abs(diffangle) >= 40.0 - abs(deviation)*16.0
               or abs(deviation) >= 2.0):
                 # cannot simplify pnt as it will break constraint
                 cache = [ (angles[1], dists[1]) ]
@@ -499,3 +500,314 @@ def getdeviation(diffangle, dist1, dist2, dist3):
     # diffangle = 180 - realangle
     angle = math.radians(diffangle)
     return (dist1 * dist2 * math.sin(angle) / dist3)
+
+
+def fixSelfIntersect(points, ptsdeleted):
+    """
+    Check if line after simplification is self-intersecting.
+    Try to remove the self-intersecting condition.
+    """
+
+    crossing = findLineIntersection(points)
+    if not crossing:
+        return (points, ptsdeleted)
+
+    # Simplification process can result in a criss-cross intersection
+    # for example a simplified segment going through a peak
+    if len(crossing) == 2:
+        seg = []
+        for segintersect in crossing:
+            seg.append(set(segintersect))
+        if len(seg[0].intersection(seg[1])) == 1:
+            # Same segment criss-crossed by 2 segments with a common vertex
+            seg1, seg2 = seg[0].symmetric_difference(seg[1])
+            if abs(seg1-seg2) == 1:
+                # Delete common vertex from points[1:-1]
+                pt = max(seg1, seg2)
+                logo.WARN("Fix self-intersect removing %s from line %s and %s"
+                          % (points[pt],
+                             tuple(points[pt-1:pt+1]),
+                             tuple(points[pt:pt+2])))
+                ptsdeleted = ptsdeleted + points[pt:pt+1]
+                points = points[:pt] + points[pt+1:]
+                crossing = findLineIntersection(points)   # recheck
+            elif (points[0] == points[-1] and (len(points)-2) in (seg1, seg2)
+                  and 0 in (seg1, seg2)):
+                # Closed ring and common vertex is the first/last point
+                logo.WARN("Fix self-intersect removing %s from line %s and %s"
+                          % (points[0],
+                             tuple(points[-2:]),
+                             tuple(points[0:2])))
+                ptsdeleted = ptsdeleted + points[-1:]
+                points = points[1:-1] + points[1:2]
+                crossing = findLineIntersection(points)   # recheck
+    elif len(crossing) == 1:
+        # Segment N-1 and N+1 can cross when segment N is going backwards
+        for segintersect in crossing:
+            seg1, seg2 = segintersect
+            if abs(seg1-seg2) == 2:
+                # Choose which point to delete
+                # keep point closer to intersection
+                pt = max(seg1, seg2)
+                tlonsrc = [ crossing[segintersect][0] ] * 2
+                tlatsrc = [ crossing[segintersect][1] ] * 2
+                tlondst = [ points[pt-1][0], points[pt][0] ]
+                tlatdst = [ points[pt-1][1], points[pt][1] ]
+                angl, dist = angledistance(tlonsrc, tlatsrc, tlondst, tlatdst)
+                if dist[0] > dist[1]:
+                    pt = pt-1
+                logo.WARN("Fix self-intersect for line %s and %s removing %s"
+                          % (tuple(points[seg1:seg1+2]),
+                             tuple(points[seg2:seg2+2]),
+                             points[pt]))
+                ptsdeleted = ptsdeleted + points[pt:pt+1]
+                points = points[:pt] + points[pt+1:]
+                crossing = findLineIntersection(points)   # recheck
+            elif (points[0] == points[-1] and (
+                  ((len(points)-2) in (seg1, seg2) and 1 in (seg1, seg2)) or
+                  ((len(points)-3) in (seg1, seg2) and 0 in (seg1, seg2)))
+                 ):
+                # Closed ring, don't bother to check first/last segment
+                # for simplicity point 0 will be simplified
+                logo.WARN("Fix self-intersect for line %s and %s removing %s"
+                          % (tuple(points[seg1:seg1+2]),
+                             tuple(points[seg2:seg2+2]),
+                             points[0]))
+                ptsdeleted = ptsdeleted + points[-1:]
+                points = points[1:-1] + points[1:2]
+                crossing = findLineIntersection(points)   # recheck
+
+    # Cannot deal with complexe case
+    for segintersect in crossing:
+        seg1, seg2 = segintersect
+        logo.ERROR("Self-intersect from line %s and %s at %s"
+                   % (tuple(points[seg1:seg1+2]),
+                      tuple(points[seg2:seg2+2]),
+                      crossing[segintersect]))
+    return (points, ptsdeleted)
+
+
+def findLineIntersection(points):
+    """
+    Find all intersecting segments in a polyline (sweep line algorithm).
+
+    Return a dictionary with a tuple of the 2 intersecting segment number
+    as key and the coordinate of the intersection point as value.
+    """
+
+    orderedseg = []   # segment encountered by sweep line ordered top to bottom
+    crossedseg = []   # keep track of swap needed for crossing segment
+    crossings = {}    # list all segments crossing and intersection point
+
+    # Detect and keep crossing tables up to date
+    def do_detect_intersection(seg1, seg2):
+        if intersect(points[seg1], points[seg1+1],
+                     points[seg2], points[seg2+1]):
+            if (seg1,seg2) not in crossings and (seg2,seg1) not in crossings:
+                # Crossing not already detected
+                keyseg = (seg1,seg2)
+                coord =  posintersect(points[seg1], points[seg1+1],
+                                      points[seg2], points[seg2+1])
+                crossings[keyseg] = coord
+
+                # Maintain ordered list, a simple loop will do as we
+                # get a very small number of intersection
+                i = 0
+                while i < len(crossedseg):
+                    if cmpcoord(coord, crossedseg[i][0]) < 0:
+                        break
+                    i += 1
+                crossedseg.insert(i, (coord, keyseg))
+
+    # Sort key (sweep line Y or X) depends on bounding box
+    x1, y1 = reduce(lambda a,b: (min(a[0], b[0]), min(a[1], b[1])), points)
+    x2, y2 = reduce(lambda a,b: (max(a[0], b[0]), max(a[1], b[1])), points)
+    if y2-y1 > x2-x1:
+        cmpcoord = cmpcoordyx
+    else:
+        cmpcoord = cmpcoordxy
+
+    # Sort by coord this is our main event queue (crossedseg is
+    # the secondary queue for intersection event)
+    # No coord duplicate is allowed except for the first and
+    # the last point in a closed loop
+    isclosedloop = False
+    for coord in sorted(points, cmp=cmpcoord):
+        segnum = points.index(coord)
+        toremove = []
+        toinsert = []
+        if segnum != 0:
+            # Event for end point of previous segment
+            if (segnum-1) in orderedseg:
+                toremove.append(segnum-1)
+            else:
+                toinsert.append(segnum-1)
+        elif points[0] == points[-1]:
+            # Closed line same coord appears twice, do only the first
+            if isclosedloop:
+                continue
+            isclosedloop = True
+            if (len(points)-2) in orderedseg:
+                toremove.append(len(points)-2)
+            else:
+                toinsert.append(len(points)-2)
+
+        if segnum != (len(points)-1) :
+            # Event for start point of next segment
+            if (segnum) in orderedseg:
+                toremove.append(segnum)
+            else:
+                toinsert.append(segnum)
+
+        # Some reordering (swapping) for crossing segment, deal with all past
+        # intersection event (when we are beyond the intersection point)
+        # for the new upper, test intersection with the predecessor segment
+        # for the new lower, test intersection with the successor segment
+        while len(crossedseg) > 0:
+            if cmpcoord(crossedseg[0][0], coord) > 0:
+                break
+            seg1, seg2 = crossedseg[0][1]
+            crossedseg.pop(0)
+            i = orderedseg.index(seg1)
+            assert i == orderedseg.index(seg2)-1, (
+                   "Cannot swap segment %d <-> %d" % (seg1, seg2) )
+            orderedseg[i:i+2] = [ seg2, seg1 ]
+
+            if i > 0:
+                do_detect_intersection(orderedseg[i-1], seg2)
+
+            if i+1 < len(orderedseg)-1:
+                do_detect_intersection(seg1, orderedseg[i+2])
+
+
+        # Remove segment who has ended and compare predecessor segment
+        # with successor segment for intersection
+        for segnum in toremove:
+            i = orderedseg.index(segnum)
+            if 0 < i < len(orderedseg)-1:
+                do_detect_intersection(orderedseg[i-1], orderedseg[i+1])
+            del orderedseg[i]
+
+
+        # Insert new segment and compare with closest (above+below) segment
+        for segnum in toinsert:
+            i = 0
+            while i < len(orderedseg):
+                j = orderedseg[i]
+                if cmpcoord(points[j], points[j+1]) < 0:
+                    pt1 = points[j]
+                    pt2 = points[j+1]
+                else:
+                    pt1 = points[j+1]
+                    pt2 = points[j]
+
+                # Special case if 2 segment start at the same point
+                if pt1 == coord:
+                    if points[segnum] == coord:
+                        pt3 = points[segnum+1]
+                    else:
+                        pt3 = points[segnum]
+                    if cmpslope(pt3, pt1, pt2) >= 0:
+                        # Slope for this segment greater than ordered segment
+                        # (insert it above in the ordered chain)
+                        break
+                else:
+                    if cmpslope(coord, pt1, pt2) >= 0:
+                        # coord is above the ordered segment
+                        break
+                i += 1
+            orderedseg.insert(i, segnum)
+
+            if i > 0:
+                # Compare with predecessor for intersection
+                do_detect_intersection(orderedseg[i-1], segnum)
+
+            if i < len(orderedseg)-1:
+                # Compare with successor for intersection
+                do_detect_intersection(segnum, orderedseg[i+1])
+
+    return crossings
+
+
+def cmpcoordxy(a,b):
+    """
+    Compare coord by X.
+    """
+
+    if a[0] < b[0]:
+        return -1
+    if a[0] > b[0]:
+        return 1
+    if a[1] < b[1]:
+        return -1
+    if a[1] > b[1]:
+        return 1
+    return 0
+
+
+def cmpcoordyx(a,b):
+    """
+    Compare coord by Y.
+    """
+
+    if a[1] < b[1]:
+        return -1
+    if a[1] > b[1]:
+        return 1
+    if a[0] < b[0]:
+        return -1
+    if a[0] > b[0]:
+        return 1
+    return 0
+
+
+def cmpslope(a,b,c):
+    """
+    Compare slope of AB and BC.
+
+    Return -1 if slope AB < BC, 0 if slope AB = BC, 1 if slope AB > BC.
+    """
+
+    slope = (b[0]-a[0])*(c[1]-b[1]) - (c[0]-b[0])*(b[1]-a[1])
+    if slope < 0:
+        return -1
+    elif slope > 0:
+        return 1
+    return 0
+
+
+def intersect(a,b,c,d):
+    """
+    Test if AB and CD intersect.
+    """
+
+    if a == c or a == d or b == c or b == d:
+        # linked segment never cross
+        return False
+    if cmpslope(a, c, d) == cmpslope(b, c, d):
+        return False
+    if cmpslope(c, a, b) == cmpslope(d, a, b):
+        return False
+    return True
+
+
+def posintersect(a, b, c, d):
+    """
+    Return the intersection point of AB and CD.
+    Note: do not forget to check if intersection exist (see intersect()
+          function) before calling this function.
+    """
+
+    # Given the 2 crossing segment ab, cd
+    # solve the 2 equations :
+    #   (ya-yb)*x + (xb-xa)*y + (xa*yb-xb*ya) = 0
+    #   (yc-yd)*x + (xd-xc)*y + (xc*yd-xd*yc) = 0
+    coef1A = a[1]-b[1]
+    coef1B = b[0]-a[0]
+    coef1C = (a[0]*b[1]) - (b[0]*a[1])
+    coef2A = c[1]-d[1]
+    coef2B = d[0]-c[0]
+    coef2C = (c[0]*d[1]) - (d[0]*c[1])
+    y = (coef2A*coef1C - coef1A*coef2C) / (coef1A*coef2B - coef2A*coef1B)
+    x = (coef1B*coef2C - coef2B*coef1C) / (coef1A*coef2B - coef2A*coef1B)
+    return (x, y)
