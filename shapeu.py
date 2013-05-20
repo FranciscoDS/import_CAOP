@@ -300,6 +300,7 @@ class ShapeUtil:
 
             # Find useless points
             coordpts, purgepts = simplifyPoints(coordpts)
+            coordpts, purgepts = simplifyShapeZV(coordpts, purgepts)
             coordpts, purgepts = fixSelfIntersect(coordpts, purgepts)
 
             # Now the *not so* fun part, we change and delete some segments.
@@ -424,6 +425,151 @@ def simplifyPoints(points):
             stack.append(pntfound)
 
     return (resultpnt, deletepnt)
+
+
+def simplifyShapeZV(points, ptsdeleted):
+    """
+    Simplify some very big angles in line.
+    Remove 1 point if shapes looking like a Z or V.
+    """
+
+    angledist = [ angledistance(points[i-1][0],
+                                points[i-1][1],
+                                points[i][0],
+                                points[i][1])
+                     for i in xrange(1, len(points)) ]
+
+    ptsdiscard = []
+    i = 0
+    while i < len(angledist)-1:
+        # Search very big angles
+        diffangle = diffheading(angledist[i][0], angledist[i+1][0])
+        if abs(diffangle) <= 90.0:
+            i += 1
+            continue
+
+        #
+        # Two big angles in a row = Z shape
+        # 0---1
+        #    /
+        #   2---3
+        #
+        if abs(diffangle) > 135.0 and i < len(angledist)-2 and abs(
+           diffheading(angledist[i+1][0], angledist[i+2][0])) > 135.0:
+            angle_1, dist_1 = angledist[i]
+            angle_2, dist_2 = angledist[i+1]
+            angle_3, dist_3 = angledist[i+2]
+            angle_A, dist_A = angledistance(points[i+1][0], points[i+1][1],
+                                            points[i+3][0], points[i+3][1])
+            # Distance of point 1 to line 2-3
+            d1 = getdeviation(diffheading(angle_3, angle_A),
+                              dist_3, dist_A, dist_2)
+            angle_B, dist_B = angledistance(points[i][0], points[i][1],
+                                            points[i+2][0], points[i+2][1])
+            # Distance of point 2 to line 0-1
+            d2 = getdeviation(diffheading(angle_1, angle_B),
+                              dist_1, dist_B, dist_2)
+            if min(d1, d2) >= 7.0:
+                i += 1
+                continue
+
+            # Keep closest point to line
+            if d2 < d1:
+                # Remove point 1
+                logo.DEBUG("Discard %s from Z shape %s %s %s %s" % (
+                             points[i+1],
+                             points[i],
+                             points[i+1],
+                             points[i+2],
+                             points[i+3]))
+                angledist[i:i+2] = [ (angle_B, dist_B) ]
+                ptsdiscard.append(points[i+1])
+                points = points[:i+1] + points[i+2:]
+                if i > 0:
+                    i -= 1   # recheck with previous point
+            else:
+                # Remove point 2
+                logo.DEBUG("Discard %s from Z shape %s %s %s %s" % (
+                             points[i+2],
+                             points[i],
+                             points[i+1],
+                             points[i+2],
+                             points[i+3]))
+                angledist[i+1:i+3] = [ (angle_A, dist_A) ]
+                ptsdiscard.append(points[i+2])
+                points = points[:i+2] + points[i+3:]
+            continue   # Retry current position (don't increment i)
+
+        #
+        # One big angles = V shape
+        # 0   2
+        #  \ /
+        #   1
+        #
+        angle_0, dist_0 = angledistance(points[i][0], points[i][1],
+                                        points[i+2][0], points[i+2][1])
+        angle_1, dist_1 = angledist[i]
+        angle_2, dist_2 = angledist[i+1]
+        # Distance of point 0 to line 1-2
+        d1 = getdeviation(diffheading(angle_2, angle_0),
+                          dist_2, dist_0, dist_1)
+        # Distance of point 2 to line 0-1
+        d2 = getdeviation(diffheading(angle_1, angle_0),
+                          dist_1, dist_0, dist_2)
+        dist_1 = dist_1 * 6371000.0
+        dist_2 = dist_2 * 6371000.0
+
+        # Distance for simplification given by length of line 0-1 or 1-2
+        # if very big angle
+        #   length (smallest)    simplification
+        #        < 9m               2.25m
+        #       9 to 22m           length/4
+        #        > 22m              5.5m
+        # if big angle
+        #  angle    length (longest)    simplification
+        # 105-135      both < 9m           1.25m
+        #    "            < 9m             1.9m
+        #  90-105      18 to 28m           1.25m
+        #    "            > 28m            1.9m
+        if abs(diffangle) >= 135.0:
+            distmax = min(dist_1, dist_2) * 0.25
+            distmax = min(distmax, 5.5)
+            distmax = max(distmax, 2.25)
+        elif abs(diffangle) >= 105.0:
+            if max(dist_1, dist_2) < 9.0:
+                distmax = 1.25
+            else:
+                distmax = 1.9
+        else:
+            if max(dist_1, dist_2) < 18.0:
+                i += 1
+                continue
+            elif max(dist_1, dist_2) < 28.0:
+                distmax = 1.25
+            else:
+                distmax = 1.9
+
+        if min(d1, d2) < distmax:
+            # Remove point 1
+            logo.DEBUG("Discard %s from V shape %s %s %s" % (
+                         points[i+1],
+                         points[i],
+                         points[i+1],
+                         points[i+2]))
+            angledist[i:i+2] = [ (angle_0, dist_0) ]
+            ptsdiscard.append(points[i+1])
+            points = points[:i+1] + points[i+2:]
+            if i > 0:
+                i -= 1   # recheck with previous point
+            continue
+
+        i += 1
+
+    if ptsdiscard:
+        # Some point removed, redo Douglas-Peucker
+        points, ptsresimplify = simplifyPoints(points)
+        ptsdeleted = ptsdeleted + ptsdiscard + ptsresimplify
+    return (points, ptsdeleted)
 
 
 def diffheading(angle1, angle2):
