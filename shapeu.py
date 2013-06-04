@@ -379,6 +379,25 @@ class ShapeUtil:
         return cnt
 
 
+    def isRingValid(self, points):
+        """
+        Check if ring (ordered list of points) is well formed.
+        Return False if self-intersecting or self-touching.
+        """
+
+        assert points[0] == points[-1], (
+                   "Ring not closed %r <-> %r" % (points[0], points[-1]) )
+
+        # LinearRing should be simple
+        # - point (except first/last) appearing once
+        # - no intersecting line
+        if len(set(points)) < len(points)-1:
+            return False
+        if findLineIntersection(points):
+            return False
+        return True
+
+
 def simplifyPoints(points):
     """
     Simplify a line (ordered list of points).

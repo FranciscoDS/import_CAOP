@@ -26,6 +26,7 @@ import re
 import psycopg2
 from osgeo import gdal, ogr, osr
 from shapeu import ShapeUtil
+from ringue import FindClosedRings
 import logo
 import caop_config
 
@@ -217,10 +218,9 @@ def admin_CAOP(filename, shapeu, admins):
                                  "outer" : set()
                                }
 
-        # Build sets of lineid, 1 for outer ring and 1 for inner rings
-        outer = set()
-        inner = set()
-        currentset = outer
+        # Build sets of lineid, don't distinguish outer and inner rings
+        # we deal it later when verifying and grouping rings
+        lineset = set()
         for i in xrange(newgeometry.GetGeometryCount()):
             ring = newgeometry.GetGeometryRef(i)
             pntinring = []
@@ -241,205 +241,44 @@ def admin_CAOP(filename, shapeu, admins):
                     # (safety measure, normaly doesn't happen)
                     continue
                 segment = shapeu.getSegment(pntinring[pnt-1], pntinring[pnt])
-                currentset.add(shapeu.getLine(segment))
-
-            currentset = inner
+                lineset.add(shapeu.getLine(segment))
 
         # Update each administrative level
-        admins[dicofre]["outer"].update(outer)
-        admins[dicofre]["inner"].update(inner)
-
-        admins[dicofre2]["outer"].symmetric_difference_update(outer)
-        admins[dicofre2]["outer"].symmetric_difference_update(inner)
-
-        admins[dicofre1]["outer"].symmetric_difference_update(outer)
-        admins[dicofre1]["outer"].symmetric_difference_update(inner)
+        admins[dicofre]["outer"].update(lineset)
+        admins[dicofre2]["outer"].symmetric_difference_update(lineset)
+        admins[dicofre1]["outer"].symmetric_difference_update(lineset)
     logo.ending()
-
-
-def findclosedrings(lines, shapeu, closedrings):
-    """
-    Group lines in closed rings.
-
-    From a list of unordered lineid construct a list of closed rings,
-    each closed rings is a list of ordered lineid.
-    Return 0 if all lines are correctly grouped in closed rings.
-    """
-
-    lineconnect = []
-    openrings = []
-    for lineid in lines:
-        pointid1, pointid2 = shapeu.getLineEnds(lineid)
-        if pointid1 == pointid2:
-            # line is a closed loop per itself
-            closedrings.append([ lineid ])
-            continue
-        try:
-            seg1 = lineconnect.index(pointid1)
-            # link on pointid1
-            ring = openrings[seg1/2]
-            try:
-                seg2 = lineconnect.index(pointid2)
-                if seg1^1 == seg2:
-                    # the missing piece to close the ring
-                    ring.append(lineid)
-                    closedrings.append(ring)
-                    seg1 = seg1 & ~1
-                    del openrings[seg1/2]
-                    del lineconnect[seg1]
-                    del lineconnect[seg1]
-                else:
-                    # merge 2 pieces together, find which ends to connect to
-                    ring2 = openrings[seg2/2]
-                    if seg1 & 1 == 0:
-                        if seg2 & 1 == 0:
-                            # new piece links start of both rings
-                            ring.reverse()
-                            ring.append(lineid)
-                            ring.extend(ring2)
-                            lineconnect[seg1] = lineconnect[seg1+1]
-                            lineconnect[seg1+1] = lineconnect[seg2+1]
-                        else:
-                            # new piece links end of 2nd ring with start of 1st
-                            ring2.append(lineid)
-                            ring2.extend(ring)
-                            seg2 = seg2 - 1
-                            openrings[seg1/2] = ring2
-                            lineconnect[seg1] = lineconnect[seg2]
-                    else:
-                        if seg2 & 1 == 0:
-                            # new piece links end of 1st ring with start of 2nd
-                            ring.append(lineid)
-                            ring.extend(ring2)
-                            lineconnect[seg1] = lineconnect[seg2+1]
-                        else:
-                            # new piece links end of both rings
-                            ring2.reverse()
-                            ring.append(lineid)
-                            ring.extend(ring2)
-                            seg2 = seg2 - 1
-                            lineconnect[seg1] = lineconnect[seg2]
-                    del openrings[seg2/2]
-                    del lineconnect[seg2]
-                    del lineconnect[seg2]
-            except ValueError:
-                # the pointid2 end is left to be connected
-                if seg1 & 1 == 0:
-                    ring.insert(0, lineid)
-                else:
-                    ring.append(lineid)
-                lineconnect[seg1] = pointid2
-        except ValueError:
-            try:
-                seg2 = lineconnect.index(pointid2)
-                # link on pointid2, pointid1 is left to be connected
-                ring = openrings[seg2/2]
-                if seg2 & 1 == 0:
-                    ring.insert(0, lineid)
-                else:
-                    ring.append(lineid)
-                lineconnect[seg2] = pointid1
-            except ValueError:
-                # new piece, both ends left to be connected
-                openrings.append([ lineid ])
-                lineconnect.append(pointid1)
-                lineconnect.append(pointid2)
-    return len(openrings)
-
-
-def ringcontains(ring1, ring2):
-    """
-    Check if coordinates in ring2 are contained in ring1.
-    """
-
-    for lon, lat in ring2:
-        flg = False
-        for i in xrange(1, len(ring1)):
-            x1, y1 = ring1[i-1]
-            x2, y2 = ring1[i]
-            if (lat > y1 and lat <= y2) or (lat > y2 and lat <= y1):
-                if lon > x1 + (lat-y1) * (x2-x1) / (y2-y1):
-                    flg = not flg
-        if not flg:
-            return False   # At least 1 point out
-    return True
 
 
 def verify_admin(shapeu, admins):
     """
     Check that all administrative area are closed.
 
-    For the upper level (aggregation of administrative area) also search
-    for ring contained in another.
+    Also search for inner ring and update 'admins'.
     """
 
     logo.starting("Verify admin area", len(admins))
     for dicofre in admins:
         logo.progress()
-        closedrings = []
-        if len(dicofre) > 4:
-            # Check administrative area read from the shapefile
-            # this cannot fail unless something was really wrong
-            if findclosedrings(admins[dicofre]["outer"], shapeu, closedrings):
-                logo.ERROR("Area '%s' (DICOFRE=%s) outer ring not closed"
-                           % (admins[dicofre]["name"], dicofre) )
-            if findclosedrings(admins[dicofre]["inner"], shapeu, closedrings):
-                logo.ERROR("Area '%s' (DICOFRE=%s) inner ring not closed\n"
-                           % (admins[dicofre]["name"], dicofre) )
-        else:
-            # Analyze the aggregate administrative area
-            if findclosedrings(admins[dicofre]["outer"], shapeu, closedrings):
-                logo.ERROR("Area '%s' (DICOFRE=%s) not closed\n"
-                           % (admins[dicofre]["name"], dicofre) )
+        logo.DEBUG("Area level=%(level)d '%(name)s'" % admins[dicofre])
 
-            # Get coordinates of each ring, compare and detect inner rings
-            bboxrings = []
-            coordrings = []
-            for ring in closedrings:
-                coords = []
-                for lineid in ring:
-                    coordinline = shapeu.getLineCoords(lineid)
-                    if coords:
-                        # Ensure coordinates are ordered in the ring
-                        if coords[-1] == coordinline[-1]:
-                            coordinline.reverse()
-                        elif coords[0] == coordinline[0]:
-                            coords.reverse()
-                        elif coords[0] == coordinline[-1]:
-                            coords.reverse()
-                            coordinline.reverse()
-                        coordinline.pop(0)
-                    coords.extend(coordinline)
-                coordrings.append(coords)
+        # Administrative areas read from the shapefile are also checked
+        # and dispatched into outer/inner ring, even if technically only
+        # the upper and reconstructed admin level need it (the shapefile
+        # already knows what's outer and inner, but we avoid a special
+        # case and it cannot fail unless something was really wrong).
+        closedrings = FindClosedRings(shapeu, admins[dicofre]["outer"])
+        if closedrings.getLineDiscarded():
+            logo.ERROR("Area '%s' (DICOFRE=%s) ring not closed\n"
+                       % (admins[dicofre]["name"], dicofre) )
 
-                # Ring bounding box
-                xmin, ymin = xmax, ymax = coords[0]
-                for lon, lat in coords:
-                    xmin = min(xmin, lon)
-                    xmax = max(xmax, lon)
-                    ymin = min(ymin, lat)
-                    ymax = max(ymax, lat)
-                bboxrings.append( (xmin, xmax, ymin, ymax) )
+        # Moving lineids from outer to inner
+        for outer, inner in closedrings.iterPolygons():
+            for ring in inner:
+                lineids = closedrings.getLineRing(ring)
+                admins[dicofre]["outer"].difference_update(lineids)
+                admins[dicofre]["inner"].update(lineids)
 
-
-            # Compare each ring
-            for i in xrange(len(coordrings)):
-                for j in xrange(len(coordrings)):
-                    if i == j:
-                        continue
-
-                    # Check bounding box ring 1 contains bounding box ring 2
-                    xmin1, xmax1, ymin1, ymax1 = bboxrings[i]
-                    xmin2, xmax2, ymin2, ymax2 = bboxrings[j]
-                    if (xmin2 <= xmin1 or xmax2 >= xmax1
-                      or ymin2 <= ymin1 or ymax2 >= ymax1):
-                        continue
-
-                    # Moving lineids from outer to inner
-                    if ringcontains(coordrings[i], coordrings[j]):
-                        admins[dicofre]["outer"].difference_update(closedrings[j])
-                        admins[dicofre]["inner"].update(closedrings[j])
-                        break
     logo.ending()
 
 
@@ -749,6 +588,7 @@ def main():
     admins = {}
     for i in xrange(1, len(sys.argv)):
         admin_CAOP(sys.argv[i], shapeu, admins)
+    logo.INFO("Verifying administrative area")
     verify_admin(shapeu, admins)
 
     logo.INFO("Importing into database")
