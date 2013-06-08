@@ -24,6 +24,7 @@
 import sys
 import re
 import psycopg2
+from cStringIO import StringIO
 from osgeo import gdal, ogr, osr
 from shapeu import ShapeUtil
 from ringue import FindClosedRings
@@ -33,6 +34,10 @@ import caop_config
 # GDAL 1.9.0 can do the ISO8859-1 to UTF-8 recoding for us
 # but will do it ourself to be backward compatible
 gdal.SetConfigOption('SHAPE_ENCODING', '')
+
+# Use SQL operator IN with set() like tuple (reuse tuple adaptation)
+psycopg2.extensions.register_adapter(set, lambda x:
+                                           psycopg2.extensions.adapt(tuple(x)))
 
 
 #
@@ -417,6 +422,9 @@ def create_temp_table(db):
                           DEFAULT nextval('seq_caop_id'),
                         PRIMARY KEY (point_id)
                           )""")
+    cursor.execute("""SELECT AddGeometryColumn('caop_points', 'geom',
+                                               4326, 'POINT', 2)
+                   """)
     cursor.execute("""CREATE TEMPORARY TABLE caop_lines (
                         line_id int NOT NULL,
                         caop_id bigint NOT NULL
@@ -427,7 +435,24 @@ def create_temp_table(db):
                         admin_id int NOT NULL,
                         caop_id bigint NOT NULL
                           DEFAULT nextval('seq_caop_id'),
-                            PRIMARY KEY (admin_id)
+                        name text NOT NULL,
+                        level int NOT NULL,
+                        PRIMARY KEY (admin_id)
+                      )""")
+
+    # Table for bulk copy content in lines/admins
+    cursor.execute("""CREATE TEMPORARY TABLE caop_linepts (
+                        line_id int NOT NULL,
+                        sequence_id int NOT NULL,
+                        point_id int NOT NULL,
+                        PRIMARY KEY (line_id, sequence_id)
+                      )""")
+    cursor.execute("""CREATE TEMPORARY TABLE caop_adminlines (
+                        admin_id int NOT NULL,
+                        line_id int NOT NULL,
+                        role text NOT NULL,
+                        sequence_id int NOT NULL,
+                        PRIMARY KEY (admin_id, sequence_id)
                       )""")
 
     db.commit()
@@ -439,91 +464,124 @@ def import_caop(db, shapeu, admins):
     """
 
     cursor = db.cursor()
+    logo.starting("Saving nodes, ways, relations",
+                  shapeu.nbrPoints() + shapeu.nbrLines() + len(admins))
 
     # Points -> Nodes
-    logo.starting("Saving nodes", shapeu.nbrPoints())
+    # - bulk copy to a temp table to get a new unique id
+    # - do only one big insert with new ids to the finale table
+    logo.DEBUG("Write nodes to database")
+    buffcopy = StringIO()
     for pointid, coord in shapeu.iterPoints():
         logo.progress()
-        pointwkt = "POINT(%.7f %.7f)" % (coord[0], coord[1])
-        cursor.execute("""INSERT INTO caop_points (point_id) VALUES (%s)""",
-                       (pointid,) )
-        cursor.execute("""INSERT INTO caop_nodes (caop_id, geom) VALUES (
-                            currval('seq_caop_id'),
-                            ST_GeomFromText(%s, 4326))""", (pointwkt,) )
+        pointEwkt = "SRID=4326;POINT(%.7f %.7f)" % (coord[0], coord[1])
+        buffcopy.write("%d\t%s\n" % (pointid, pointEwkt))
+    buffcopy.seek(0)
+    cursor.copy_from(buffcopy, 'caop_points', columns=('point_id', 'geom'))
+    cursor.execute("""INSERT INTO caop_nodes (caop_id, geom)
+                      SELECT caop_id, geom FROM caop_points
+                   """)
     db.commit()
-    logo.ending()
+    buffcopy.close()
 
     # Lines -> Ways
-    logo.starting("Saving ways", shapeu.nbrLines())
+    # - bulk copy to a temp table to get a new unique id
+    # - bulk copy points in lines in a temp table
+    # - insert all ways with new ids as administrative level 8
+    logo.DEBUG("Write ways to database")
+    buffcopy1 = StringIO()
+    buffcopy2 = StringIO()
     for lineid, pntids in shapeu.iterLines():
         logo.progress()
-        cursor.execute("""INSERT INTO caop_lines (line_id) VALUES (%s)""",
-                       (lineid,) )
-        cursor.execute("""INSERT INTO caop_ways (caop_id) VALUES (
-                            currval('seq_caop_id')
-                          )""")
-        orderpntids = zip(range(len(pntids)), pntids)
-        cursor.executemany("""INSERT INTO caop_way_nodes SELECT
-                                currval('seq_caop_id'), caop_id, %s
-                              FROM caop_points WHERE point_id = %s
-                           """, orderpntids)
-        cursor.execute("""INSERT INTO caop_way_tags VALUES (
-                            currval('seq_caop_id'),
-                            'boundary', 'administrative'
-                          )""")
-        cursor.execute("""INSERT INTO caop_way_tags VALUES (
-                            currval('seq_caop_id'),
-                            'admin_level', 8
-                          )""")
+        buffcopy1.write("%d\n" % lineid)
+        for orderpntid in enumerate(pntids):
+            buffcopy2.write("%d\t" % lineid)
+            buffcopy2.write("%d\t%d\n" % orderpntid)
+    buffcopy1.seek(0)
+    cursor.copy_from(buffcopy1, 'caop_lines', columns=('line_id',))
+    cursor.execute("""INSERT INTO caop_ways (caop_id)
+                      SELECT caop_id FROM caop_lines
+                   """)
+    buffcopy2.seek(0)
+    cursor.copy_from(buffcopy2, 'caop_linepts')
+    cursor.execute("""INSERT INTO caop_way_nodes
+                      SELECT A.caop_id, B.caop_id, C.sequence_id
+                      FROM caop_lines A, caop_points B, caop_linepts C
+                      WHERE A.line_id = C.line_id
+                      AND C.point_id = B.point_id
+                   """)
+    cursor.execute("""INSERT INTO caop_way_tags
+                      SELECT caop_id, 'boundary', 'administrative'
+                      FROM caop_lines
+                   """)
+    cursor.execute("""INSERT INTO caop_way_tags
+                      SELECT caop_id, 'admin_level', 8
+                      FROM caop_lines
+                   """)
     db.commit()
-    logo.ending()
+    buffcopy1.close()
+    buffcopy2.close()
 
     # Admins -> Relations
-    cpt = 0
-    logo.starting("Saving relations", len(admins))
-    for dicofre in admins:
-        cpt += 1
-        logo.progress(cpt)
-        cursor.execute("""INSERT INTO caop_admins (admin_id) VALUES (%s)""",
-                       (cpt,) )
-        cursor.execute("""INSERT INTO caop_relations (caop_id) VALUES (
-                            currval('seq_caop_id')
-                          )""")
+    # - bulk copy to a temp table to get a new unique id
+    # - bulk copy lines in admins in a temp table
+    # - correct outer ways administrative level
+    # - insert all tags for administrative area
+    logo.DEBUG("Write relations to database")
+    buffcopy1 = StringIO()
+    buffcopy2 = StringIO()
+    for (num,dicofre) in enumerate(admins):
+        logo.progress()
+        buffcopy1.write("%d\t" % num)
+        buffcopy1.write("%(name)s\t%(level)d\n" % admins[dicofre])
         sequenceid = 0
         for role in ("outer", "inner"):
             for lineid in admins[dicofre][role]:
-                cursor.execute("""INSERT INTO caop_relation_members SELECT
-                                    currval('seq_caop_id'),
-                                    caop_id, 'W', %s, %s
-                                  FROM caop_lines WHERE line_id = %s
-                               """, (role, sequenceid, lineid) )
+                buffcopy2.write("%d\t%d\t%s\t%d\n" % (
+                                num, lineid, role, sequenceid))
                 sequenceid += 1
-        cursor.execute("""INSERT INTO caop_relation_tags VALUES (
-                            currval('seq_caop_id'),
-                            'type', 'boundary'
-                          )""")
-        cursor.execute("""INSERT INTO caop_relation_tags VALUES (
-                            currval('seq_caop_id'),
-                            'boundary', 'administrative'
-                          )""")
-        cursor.execute("""INSERT INTO caop_relation_tags VALUES (
-                            currval('seq_caop_id'),
-                            'admin_level', %(level)s
-                          )""", admins[dicofre])
-        cursor.execute("""INSERT INTO caop_relation_tags VALUES (
-                            currval('seq_caop_id'),
-                            'name', %(name)s
-                          )""", admins[dicofre])
-        if admins[dicofre]["level"] < 8:
-            cursor.execute("""UPDATE caop_way_tags SET v = %s
-                              FROM caop_relation_members AS R
-                              WHERE R.caop_id = currval('seq_caop_id')
-                              AND caop_way_tags.caop_id = R.member_id
+        if admins[dicofre]['level'] < 8:
+            cursor.execute("""UPDATE caop_way_tags SET v = %(level)s
+                              FROM caop_lines A
+                              WHERE caop_way_tags.caop_id = A.caop_id
+                              AND A.line_id IN %(outer)s
                               AND k = 'admin_level'
-                              AND v::int > %s
-                           """, (admins[dicofre]["level"],
-                                 admins[dicofre]["level"]) )
+                              AND v::int > %(level)s
+                           """, admins[dicofre])
     db.commit()
+    buffcopy1.seek(0)
+    cursor.copy_from(buffcopy1, 'caop_admins', columns=('admin_id',
+                                                        'name', 'level'))
+    cursor.execute("""INSERT INTO caop_relations (caop_id)
+                      SELECT caop_id FROM caop_admins
+                   """)
+    buffcopy2.seek(0)
+    cursor.copy_from(buffcopy2, 'caop_adminlines')
+    cursor.execute("""INSERT INTO caop_relation_members
+                      SELECT A.caop_id, B.caop_id, 'W', C.role, C.sequence_id
+                      FROM caop_admins A, caop_lines B, caop_adminlines C
+                      WHERE A.admin_id = C.admin_id
+                      AND C.line_id = B.line_id
+                   """)
+    cursor.execute("""INSERT INTO caop_relation_tags
+                      SELECT caop_id, 'type', 'boundary'
+                      FROM caop_admins
+                   """)
+    cursor.execute("""INSERT INTO caop_relation_tags
+                      SELECT caop_id, 'boundary', 'administrative'
+                      FROM caop_admins
+                   """)
+    cursor.execute("""INSERT INTO caop_relation_tags
+                      SELECT caop_id, 'admin_level', level::text
+                      FROM caop_admins
+                   """)
+    cursor.execute("""INSERT INTO caop_relation_tags
+                      SELECT caop_id, 'name', name
+                      FROM caop_admins
+                   """)
+    db.commit()
+    buffcopy1.close()
+    buffcopy2.close()
     logo.ending()
 
 
