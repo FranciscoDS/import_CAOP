@@ -195,7 +195,8 @@ def admin_CAOP(filename, shapeu, admins):
                 admins[dicofre1] = { "name" : distrito,
                                      "level" : 4,
                                      "inner" : set(),
-                                     "outer" : set()
+                                     "outer" : set(),
+                                     "bbox" : None
                                    }
         else:
             dicofre1  = dicofre[0:2]
@@ -203,7 +204,8 @@ def admin_CAOP(filename, shapeu, admins):
                 admins[dicofre1] = { "name" : distrito,
                                      "level" : 6,
                                      "inner" : set(),
-                                     "outer" : set()
+                                     "outer" : set(),
+                                     "bbox" : None
                                    }
 
         # Municipio
@@ -212,7 +214,8 @@ def admin_CAOP(filename, shapeu, admins):
             admins[dicofre2] = { "name" : municipio,
                                  "level" : 7,
                                  "inner" : set(),
-                                 "outer" : set()
+                                 "outer" : set(),
+                                 "bbox" : None
                                }
 
         # Freguesia
@@ -220,7 +223,8 @@ def admin_CAOP(filename, shapeu, admins):
             admins[dicofre]  = { "name" : freguesia,
                                  "level" : 8,
                                  "inner" : set(),
-                                 "outer" : set()
+                                 "outer" : set(),
+                                 "bbox" : None
                                }
 
         # Build sets of lineid, don't distinguish outer and inner rings
@@ -277,12 +281,26 @@ def verify_admin(shapeu, admins):
             logo.ERROR("Area '%s' (DICOFRE=%s) ring not closed\n"
                        % (admins[dicofre]["name"], dicofre) )
 
-        # Moving lineids from outer to inner
+        # Moving lineids from outer to inner and compute envelope
         for outer, inner in closedrings.iterPolygons():
             for ring in inner:
                 lineids = closedrings.getLineRing(ring)
                 admins[dicofre]["outer"].difference_update(lineids)
                 admins[dicofre]["inner"].update(lineids)
+
+            # Bounding box on outer rings
+            xmin, xmax, ymin, ymax = closedrings.getExtentRing(outer)
+            if not admins[dicofre]["bbox"]:
+                admins[dicofre]["bbox"] = [ xmin, xmax, ymin, ymax ]
+            else:
+                if xmin < admins[dicofre]["bbox"][0]:
+                    admins[dicofre]["bbox"][0] = xmin
+                if xmax > admins[dicofre]["bbox"][1]:
+                    admins[dicofre]["bbox"][1] = xmax
+                if ymin < admins[dicofre]["bbox"][2]:
+                    admins[dicofre]["bbox"][2] = ymin
+                if ymax > admins[dicofre]["bbox"][3]:
+                    admins[dicofre]["bbox"][3] = ymax
 
     logo.ending()
 
@@ -342,6 +360,9 @@ def create_caop_table(db):
                         version int,
                         action character(1)
                       )""")
+    cursor.execute("""SELECT AddGeometryColumn('caop_relations', 'bbox',
+                                               4326, 'GEOMETRY', 2)
+                   """)
     cursor.execute("""DROP TABLE IF EXISTS caop_relation_members""")
     cursor.execute("""CREATE TABLE caop_relation_members (
                         caop_id bigint NOT NULL,
@@ -382,10 +403,13 @@ def create_caop_table(db):
                         PRIMARY KEY (caop_id, sequence_id)
                    """)
 
-    # Create index on nodes
+    # Create spatial index
     logo.DEBUG("Create index")
     cursor.execute("""CREATE INDEX idx_caop_node_geom
                       ON caop_nodes USING gist (geom)
+                   """)
+    cursor.execute("""CREATE INDEX idx_caop_relation_bbox
+                      ON caop_relations USING gist (bbox)
                    """)
 
     # Create index for tags
@@ -439,6 +463,9 @@ def create_temp_table(db):
                         level int NOT NULL,
                         PRIMARY KEY (admin_id)
                       )""")
+    cursor.execute("""SELECT AddGeometryColumn('caop_admins', 'bbox',
+                                               4326, 'GEOMETRY', 2)
+                   """)
 
     # Table for bulk copy content in lines/admins
     cursor.execute("""CREATE TEMPORARY TABLE caop_linepts (
@@ -533,7 +560,8 @@ def import_caop(db, shapeu, admins):
     for (num,dicofre) in enumerate(admins):
         logo.progress()
         buffcopy1.write("%d\t" % num)
-        buffcopy1.write("%(name)s\t%(level)d\n" % admins[dicofre])
+        buffcopy1.write("%(name)s\t%(level)d\t" % admins[dicofre])
+        buffcopy1.write("SRID=4326;POLYGON((%(x1).7f %(y1).7f,%(x1).7f %(y2).7f,%(x2).7f %(y2).7f,%(x2).7f %(y1).7f,%(x1).7f %(y1).7f))\n" % dict(zip(['x1', 'x2', 'y1', 'y2'], admins[dicofre]['bbox'])) )
         sequenceid = 0
         for role in ("outer", "inner"):
             for lineid in admins[dicofre][role]:
@@ -550,10 +578,10 @@ def import_caop(db, shapeu, admins):
                            """, admins[dicofre])
     db.commit()
     buffcopy1.seek(0)
-    cursor.copy_from(buffcopy1, 'caop_admins', columns=('admin_id',
-                                                        'name', 'level'))
-    cursor.execute("""INSERT INTO caop_relations (caop_id)
-                      SELECT caop_id FROM caop_admins
+    cursor.copy_from(buffcopy1, 'caop_admins', columns=('admin_id', 'name',
+                                                        'level', 'bbox'))
+    cursor.execute("""INSERT INTO caop_relations (caop_id, bbox)
+                      SELECT caop_id, bbox FROM caop_admins
                    """)
     buffcopy2.seek(0)
     cursor.copy_from(buffcopy2, 'caop_adminlines')

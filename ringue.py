@@ -304,6 +304,16 @@ class FindClosedRings:
         return self.polygonring.iteritems()
 
 
+    def getExtentRing(self, ringnum):
+        """
+        Return bounding box for a ring.
+
+        Return (xmin, xmax, ymin, ymax).
+        """
+
+        return self.bboxrings[ringnum]
+
+
     def group_ring(self):
         """
         Find inner rings for each outer rings.
@@ -311,8 +321,8 @@ class FindClosedRings:
 
         self.polygonring = {}
         nbr = self.nbrRing()
-        bboxrings = []
         coordrings = []
+        self.bboxrings = []
 
         # List relationship for a ring
         # - if N is contained by A, B : containedby[N] = [ A, B, ... ]
@@ -329,7 +339,7 @@ class FindClosedRings:
             ymin = min(coords, key=lambda a: a[1])[1]
             xmax = max(coords, key=lambda a: a[0])[0]
             ymax = max(coords, key=lambda a: a[1])[1]
-            bboxrings.append( (xmin, xmax, ymin, ymax) )
+            self.bboxrings.append( (xmin, xmax, ymin, ymax) )
 
         # Compare each ring and cache result in ring contained by ring list
         for i in xrange(nbr):
@@ -338,8 +348,8 @@ class FindClosedRings:
                     continue
 
                 # Check bounding box ring 1 contains bounding box ring 2
-                xmin1, xmax1, ymin1, ymax1 = bboxrings[i]
-                xmin2, xmax2, ymin2, ymax2 = bboxrings[j]
+                xmin1, xmax1, ymin1, ymax1 = self.bboxrings[i]
+                xmin2, xmax2, ymin2, ymax2 = self.bboxrings[j]
                 if (xmin2 < xmin1 or xmax2 > xmax1
                   or ymin2 < ymin1 or ymax2 > ymax1):
                     continue
