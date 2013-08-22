@@ -22,7 +22,6 @@ está presente na sua distribuiçao Linux é preciso fazer a instalação a part
 do código fonte, não esquecer instalar os packages 'dev' por este efeito.
 
 
-
 Preparação :
 ------------
 
@@ -37,34 +36,51 @@ osmosis :
     - ALTER TABLE geometry_columns OWNER TO caop;
     - ALTER TABLE spatial_ref_sys OWNER TO caop;
   - psql -d osmosis -f pgsimple_schema_0.6.sql
-  - osmosis --read-xml file=portugal.osm.bz2 \
+  - osmosis --read-xml file=portugal-latest.osm.bz2 \
             --write-pgsimp database=osmosis user=caop
 
 
-O ficheiro portugal.osm.bz2 que deve ser recuperado do site de geofabrik
-(http://download.geofabrik.de/osm/) ficará assim integrado na base de dados.
-Esta parte não é obrigatório, o programa que permite a comparação dos dados
-CAOP com os dados já existente no OSM ainda não foi desenvolvido.
-O 'caop_build.py' trabalha no schema osmosis com tabelas diferentes do OSM.
+O ficheiro portugal-latest.osm.bz2 que deve ser recuperado do site de geofabrik
+(http://download.geofabrik.de/europe/portugal.html) ficará assim integrado na
+base de dados.
+Se usaram o ficheiro portugal-latest.osm.pbf modifica o comando osmosis e
+usam --read-pbf em vez do --read-xml.
+ 
+Nota: os Açores não estão incluído no ficheiro de Portugal e são disponível
+no geofabrik em http://download.geofabrik.de/europe/azores.html.
+
+Os dados CAOP são importados no schema osmosis em tabelas diferentes dos dados
+OSM, por isso a base de dados pode ser constituído na ordem e as vezes que
+quiseram.
 
 
-
-Execução :
-----------
+Configuração :
+--------------
 
 O ficheiro 'caop_config.py' permite alterar a configuração do programa.
 O mais importante é o 'dbname' que permite identificar a base de dados.
-Uma vez que foi configurado basta chamar o programa com o ficheiro ou os
-ficheiros Shapefile para ser convertidos :
+É aconselhado ativar o ficheiro de log em 'logfile' e eventualmente aumentar
+o nível de debug em 'verbose'.
+
+Uma vez que foi configurado basta chamar os programas por ordem :
+  - caop_build.py para convertir a CAOP em objetos compatível OSM
+  - caop_diff.py para comparar e detectar as mudança com os objetos OSM
+
+
+Conversão
+---------
+
+A importação dos dados CAOP na base de dados local é feito pelo programa
+caop_build.py e é preciso lhe dar o nome do ficheiro ou dos ficheiros
+Shapefile par ser convertidos :
 
   - python caop_build.py ArqAcores_GCentral_AAd_CAOP2011.shp \
                          ArqAcores_GOcidental_AAd_CAOP2011.shp \
                          ArqAcores_GOriental_AAd_CAOP2011.shp
 
 
-Os dados convertidos em formato OSM vão ser integrados na base de dados (isto
-demora um bocadinho, deixar o programa trabalhar sozinho). Os dados serão
-acrescentados, isto significa que pode-se usar o programa de 2 maneiras :
+Os dados serão acrescentados na base de dados, isto significa que pode-se
+usar o programa de 2 maneiras :
 
   - execução duma só vez com todos os Shapefile a converter (se tiverem
     memoria suficiente).
@@ -82,23 +98,14 @@ importantes, por exemplo, o atribuidor de identificação única aos objetos :
     - DROP SEQUENCE seq_caop_id;
 
 
-Para que possam ver o resultado, o pequeno programa 'testsql.py' permite criar
-um ficheiro .osm :
+Comparação
+----------
 
-  - python testsql.py ficheiro.osm
+O programa caop_diff.py faz a comparação com os dados já existente.
+É necessário fazer a integração dos dados OSM indicado na preparação antes
+de user este programa.
 
-Que pode ser aberto usando um dos editor OSM (JOSM ou Merkaartor) se a memoria
-do seu computador o permite.
-
-Este ficheiro não pode e não deve ser enviado para OSM, é demasiado grande e
-falta a comparação com os dados já existente.
+  - python caop_diff.py
 
 
-
-Falta para fazer :
-------------------
-
-Falta o programa que permite identificar e misturar os dados OSM com os dados
-CAOP.
-Também falta o programa que permite o envio em grande escala para OSM (inicio).
-
+Por enquanto o programa só identifica as relações já existente.
