@@ -496,9 +496,18 @@ class ShapeUtil:
         # LinearRing should be simple
         # - point (except first/last) appearing once
         # - no intersecting line
-        if len(set(points)) < len(points)-1:
+        uniqpoints = set(points)
+        if len(uniqpoints) < len(points)-1:
+            for coord in points[:-1]:
+                try:
+                    uniqpoints.remove(coord)
+                except KeyError:
+                    logo.DEBUG("Duplicate point in ring at %s" % (coord,))
             return False
-        if findLineIntersection(points):
+        crossing = findLineIntersection(points)
+        if crossing:
+            for coord in crossing.values():
+                logo.DEBUG("Ring self-intersect at %s" % (coord,))
             return False
         return True
 

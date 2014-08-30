@@ -79,6 +79,10 @@ def convertname(name):
         if i > 0:
             if tok in preposition:
                 tok = tok.lower()
+
+        # First letter of name if the D' is glued with name
+        if tok.startswith("D'"):
+            tok = "d'" + tok[2:].capitalize()
         tokens[i] = tok
 
         # Special case: eat the space following a d' preposition
@@ -278,8 +282,12 @@ def verify_admin(shapeu, admins):
         # case and it cannot fail unless something was really wrong).
         closedrings = FindClosedRings(shapeu, admins[dicofre]["outer"])
         if closedrings.getLineDiscarded():
-            logo.ERROR("Area '%s' (DICOFRE=%s) ring not closed\n"
+            logo.ERROR("Area '%s' (DICOFRE=%s) not a valid closed ring\n"
                        % (admins[dicofre]["name"], dicofre) )
+            for line in closedrings.getLineDiscarded():
+                coords = shapeu.getLineCoords(line)
+                logo.DEBUG("Line in ring with %d points still open %s -> %s"
+                           % (len(coords), coords[0], coords[-1]) )
 
         # Moving lineids from outer to inner and compute envelope
         for outer, inner in closedrings.iterPolygons():
@@ -356,7 +364,7 @@ def create_caop_table(db):
     cursor.execute("""DROP TABLE IF EXISTS caop_relations""")
     cursor.execute("""CREATE TABLE caop_relations (
                         caop_id bigint NOT NULL,
-                        osmid int,
+                        osmid bigint,
                         version int,
                         action character(1)
                       )""")
