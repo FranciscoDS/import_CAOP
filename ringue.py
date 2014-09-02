@@ -64,8 +64,9 @@ class FindClosedRings:
         # Event in lineconnect to go when backtracking
         self.backstack = []
 
-        # Unclosed ring lines (no more backtrack)
-        self.linediscard = []
+        # Keep state for unclosed ring (when backtracking have failed)
+        self.discardconnect = []
+        self.discardends = []
 
         for lineid in lines:
             # Store start/end node of each line
@@ -83,7 +84,7 @@ class FindClosedRings:
             if self.assemble_ring():
                 if self.ringend1 == self.ringend2:
                     # Ring is closed, get geometry and check validity
-                    points = self.build_geometry_ring()
+                    points = self.getGeometryRing()
                     if self.backend.isRingValid(points):
                         # Even if the ring is valid, do not save the geometry
                         # we will backtrack and build another ring association
@@ -143,18 +144,24 @@ class FindClosedRings:
 
         ind = self.lineidx                    # for backtrack purpose
         while self.ringend1 != self.ringend2:
-            # Find index of a line connecting with ring
-            dirjonction = self.RING_CONNECT_END
+            # Find first index of a line connecting with ring
+            dirconnect = []
             try:
-                ind = self.lineends.index(self.ringend2, ind)
+                dirconnect.append( (self.lineends.index(self.ringend2, ind),
+                                    self.RING_CONNECT_END) )
             except ValueError:
-                dirjonction = self.RING_CONNECT_BEGIN
-                try:
-                    ind = self.lineends.index(self.ringend1, ind)
-                except ValueError:
-                    # Assembling finished, ring is not closed
-                    return True
+                pass
+            try:
+                dirconnect.append( (self.lineends.index(self.ringend1, ind),
+                                    self.RING_CONNECT_BEGIN) )
+            except ValueError:
+                pass
 
+            if not dirconnect:
+                # Assembling finished, ring is not closed
+                return True
+
+            ind, dirjonction = min(dirconnect)
             if self.linedone[int(ind/2)]:
                 # Line already seen, try another one
                 ind = (ind | 1) + 1
@@ -216,28 +223,42 @@ class FindClosedRings:
         Discard lines of a malformed ring.
         """
 
-        while self.lineconnect:
-            # Remove from backtrack but keep line as consumed
-            ind, dirjonction = self.lineconnect.pop()
-            self.linediscard.append(self.lines[int(ind/2)])
-
-            # Remove up to the beginning of current ring
+        lines = []
+        ind = len(self.lineconnect)
+        while ind > 0:
+            # Search to remove up to the beginning of current ring
+            ind -= 1
+            line, dirjonction = self.lineconnect[ind]
             if dirjonction == self.RING_CONNECT_FIRST:
                 break
 
-        self.backstack = filter(lambda x: x < len(self.lineconnect()),
-                                self.backstack)
+        # Remove from backtrack but keep line as consumed
+        self.discardconnect.extend(self.lineconnect[ind:])
+        del self.lineconnect[ind:]
+        self.backstack = filter(lambda x: x < ind, self.backstack)
+        self.discardends.append( (self.ringend1, self.ringend2) )
         self.newring = True
 
 
-    def build_geometry_ring(self, ringnum=-1):
+    def isValid(self):
         """
-        Return geometry (ordered list of coordinates) for a ring.
+        Return True if all lines have been used to form valid rings.
         """
 
-        start, end = self._getconnect_ring(ringnum)
+        if self.discardconnect:
+            return False
+        return True
+
+
+    def _build_geometry(self, ringnum=-1, usediscard=False):
+        if usediscard:
+            lineconnect = self.discardconnect
+        else:
+            lineconnect = self.lineconnect
+
+        start, end = self._getconnect_ring(ringnum, usediscard)
         points = []
-        for ind, dirjonction in self.lineconnect[start:end]:
+        for ind, dirjonction in lineconnect[start:end]:
             lstpnt = self.backend.getLineCoords(self.lines[int(ind/2)])
             if dirjonction == self.RING_CONNECT_FIRST:
                 points = lstpnt
@@ -255,18 +276,53 @@ class FindClosedRings:
                 points[-1:] = lstpnt
         return points
 
-
-    def getLineDiscarded(self):
+    def getGeometryRing(self, ringnum=-1):
         """
-        Return list of lines ID not in a ring.
+        Return geometry (ordered list of coordinates) for a ring.
         """
 
-        return self.linediscard
+        return self._build_geometry(ringnum)
+
+
+    def getGeometryDiscarded(self, ringnum=-1):
+        """
+        Return geometry (ordered list of coordinates) in a rejected ring.
+        """
+
+        return self._build_geometry(ringnum, usediscard=True)
+
+
+    def iterRingDiscarded(self):
+        """
+        Iterate on not well formed ring.
+
+        Return for each partial ring :
+        - ring number
+        - first point ID
+        - last point ID
+
+        For an open ring first_point != last_point, for a closed but
+        still invalid ring (self-intersecting) first_point = last_point.
+        """
+
+        for ringnum, (pnt1,pnt2) in enumerate(self.discardends):
+            yield (ringnum, pnt1, pnt2)
+
+
+    def getLineDiscarded(self, ringnum=-1):
+        """
+        Return unordered list of lines ID in a not well formed ring.
+        """
+
+        start, end = self._getconnect_ring(ringnum, usediscard=True)
+        lines = [ self.lines[int(ind/2)]
+                  for ind, dirjonction in self.discardconnect[start:end] ]
+        return lines
 
 
     def getLineRing(self, ringnum=-1):
         """
-        Return ordered list of lines ID for a ring.
+        Return unordered list of lines ID for a ring.
         """
 
         start, end = self._getconnect_ring(ringnum)
@@ -284,11 +340,15 @@ class FindClosedRings:
                       if i[1] == self.RING_CONNECT_FIRST ])
 
 
-    def _getconnect_ring(self, ringnum):
-        ring_pos = [ i for i, j in enumerate(self.lineconnect)
+    def _getconnect_ring(self, ringnum, usediscard=False):
+        if usediscard:
+            lineconnect = self.discardconnect
+        else:
+            lineconnect = self.lineconnect
+        ring_pos = [ i for i, j in enumerate(lineconnect)
                       if j[1] == self.RING_CONNECT_FIRST ]
         start = ring_pos[ringnum]
-        ring_pos[0] = len(self.lineconnect)
+        ring_pos[0] = len(lineconnect)
         ringnum = (ringnum+1) % len(ring_pos)
         end = ring_pos[ringnum]
         return (start, end)
@@ -302,6 +362,26 @@ class FindClosedRings:
         """
 
         return self.polygonring.iteritems()
+
+
+    def getExtentLineDiscarded(self):
+        """
+        Return bounding box of all lines not in a ring.
+        """
+
+        xmin = []
+        xmax = []
+        ymin = []
+        ymax = []
+        lines = [ self.lines[int(ind/2)]
+                  for ind, dirjonction in self.discardconnect ]
+        for lineid in lines:
+            coords = self.backend.getLineCoords(lineid)
+            xmin.append(min(coords, key=lambda a: a[0])[0])
+            ymin.append(min(coords, key=lambda a: a[1])[1])
+            xmax.append(max(coords, key=lambda a: a[0])[0])
+            ymax.append(max(coords, key=lambda a: a[1])[1])
+        return ( min(xmin), max(xmax), min(ymin), max(ymax) )
 
 
     def getExtentRing(self, ringnum):
@@ -331,7 +411,7 @@ class FindClosedRings:
 
         for ring in xrange(nbr):
             # Get coordinates of each ring
-            coords = self.build_geometry_ring(ring)
+            coords = self.getGeometryRing(ring)
             coordrings.append(coords)
 
             # Ring bounding box

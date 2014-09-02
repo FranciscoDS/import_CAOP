@@ -271,6 +271,7 @@ def verify_admin(shapeu, admins):
     """
 
     logo.starting("Verify admin area", len(admins))
+    verifyinner = {}
     for dicofre in admins:
         logo.progress()
         logo.DEBUG("Area level=%(level)d '%(name)s'" % admins[dicofre])
@@ -281,13 +282,20 @@ def verify_admin(shapeu, admins):
         # already knows what's outer and inner, but we avoid a special
         # case and it cannot fail unless something was really wrong).
         closedrings = FindClosedRings(shapeu, admins[dicofre]["outer"])
-        if closedrings.getLineDiscarded():
+        if not closedrings.isValid():
             logo.ERROR("Area '%s' (DICOFRE=%s) not a valid closed ring\n"
                        % (admins[dicofre]["name"], dicofre) )
-            for line in closedrings.getLineDiscarded():
-                coords = shapeu.getLineCoords(line)
-                logo.DEBUG("Line in ring with %d points still open %s -> %s"
-                           % (len(coords), coords[0], coords[-1]) )
+            for ring, pntid1, pntid2 in closedrings.iterRingDiscarded():
+                lineids = closedrings.getLineDiscarded(ring)
+                if pntid1 == pntid2:
+                    logo.WARN("Ring with %d lines is self-intersecting, still building admin area with this defect"
+                              % len(lineids))
+                else:
+                    points = closedrings.getGeometryDiscarded(ring)
+                    logo.WARN("Ring with %d lines is open at %s -> %s, still building admin area with this defect"
+                               % (len(lineids), points[0], points[-1]))
+            xmin, xmax, ymin, ymax = closedrings.getExtentLineDiscarded()
+            admins[dicofre]["bbox"] = [ xmin, xmax, ymin, ymax ]
 
         # Moving lineids from outer to inner and compute envelope
         for outer, inner in closedrings.iterPolygons():
@@ -295,6 +303,10 @@ def verify_admin(shapeu, admins):
                 lineids = closedrings.getLineRing(ring)
                 admins[dicofre]["outer"].difference_update(lineids)
                 admins[dicofre]["inner"].update(lineids)
+                for line in lineids:
+                    # Remember lines used in inner ring for later verification
+                    key = (line, admins[dicofre]["level"])
+                    verifyinner[key] = [dicofre]
 
             # Bounding box on outer rings
             xmin, xmax, ymin, ymax = closedrings.getExtentRing(outer)
@@ -311,6 +323,30 @@ def verify_admin(shapeu, admins):
                     admins[dicofre]["bbox"][3] = ymax
 
     logo.ending()
+
+    # Each inner line on each admin level should be used as outer line
+    # in one and only one admin area with the same level
+    for dicofre in admins:
+        for line in admins[dicofre]["outer"]:
+            key = (line, admins[dicofre]["level"])
+            if key in verifyinner:
+                verifyinner[key].append(dicofre)
+    for key in verifyinner:
+        if len(verifyinner[key]) != 2:
+            dicofre = verifyinner[key][0]
+            if len(verifyinner[key]) == 1:
+                logo.ERROR("Inner line in area '%s' (DICOFRE=%s) not present as outer in any admin area with level=%d\n"
+                           % (admins[dicofre]["name"], dicofre,
+                              admins[dicofre]["level"])
+                          )
+            else:
+                logo.ERROR("Inner line in area '%s' (DICOFRE=%s) exist as multiple outer in level=%d : %s\n"
+                           % (admins[dicofre]["name"], dicofre,
+                              admins[dicofre]["level"],
+                              ', '.join([ "%s (DICOFRE=%s)" % (
+                                             admins[i]["name"], i)
+                                          for i in verifyinner[key][1:] ]))
+                          )
 
 
 def create_caop_table(db):

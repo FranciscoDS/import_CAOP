@@ -203,7 +203,8 @@ def progress(num=None):
         if num is None:
             progresscpt += 1
             num = progresscpt
-        if num > progressnext < progressmax:
+        if (num > progressnext < progressmax or
+           (num < progressmax and not inprogress)):
             num = int(100.0*num/progressmax)
             stdout.write(progresstext + str(num) + '%')
             stdout.flush()
